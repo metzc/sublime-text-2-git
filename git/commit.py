@@ -1,11 +1,14 @@
+from __future__ import absolute_import, unicode_literals, print_function, division
+
+import codecs
 import functools
 import tempfile
 import os
 
 import sublime
 import sublime_plugin
-from git import GitTextCommand, GitWindowCommand, plugin_file, view_contents, _make_text_safeish
-import add
+from . import GitTextCommand, GitWindowCommand, plugin_file, view_contents, _make_text_safeish
+from .add import GitAddSelectedHunkCommand
 
 history = []
 
@@ -83,6 +86,7 @@ class GitQuickAllCommitPushCommand(GitTextCommand):
 class GitCommitCommand(GitWindowCommand):
     active_message = False
     extra_options = ""
+    quit_when_nothing_staged = True
 
     def run(self):
         self.lines = []
@@ -90,7 +94,7 @@ class GitCommitCommand(GitWindowCommand):
         self.run_command(
             ['git', 'status', '--untracked-files=no', '--porcelain'],
             self.porcelain_status_done
-            )
+        )
 
     def porcelain_status_done(self, result):
         # todo: split out these status-parsing things... asdf
@@ -100,7 +104,7 @@ class GitCommitCommand(GitWindowCommand):
             if line and not line[0].isspace():
                 has_staged_files = True
                 break
-        if not has_staged_files:
+        if not has_staged_files and self.quit_when_nothing_staged:
             self.panel("Nothing to commit")
             return
         # Okay, get the template!
@@ -113,6 +117,7 @@ class GitCommitCommand(GitWindowCommand):
     def diff_done(self, result):
         settings = sublime.load_settings("Git.sublime-settings")
         historySize = settings.get('history_size')
+        rulers = settings.get('commit_rulers')
 
         def format(line):
             return '# ' + line.replace("\n", " ")
@@ -132,6 +137,10 @@ class GitCommitCommand(GitWindowCommand):
         msg = self.window.new_file()
         msg.set_scratch(True)
         msg.set_name("COMMIT_EDITMSG")
+
+        if rulers:
+            msg.settings().set('rulers', rulers)
+
         self._output_to_view(msg, template, syntax=plugin_file("syntax/Git Commit Message.tmLanguage"))
         msg.sel().clear()
         msg.sel().add(sublime.Region(0, 0))
@@ -153,7 +162,7 @@ class GitCommitCommand(GitWindowCommand):
         message_file.close()
         self.message_file = message_file
         # and actually commit
-        with open(message_file.name, 'r') as fp:
+        with codecs.open(message_file.name, mode = 'r', encoding = 'utf-8') as fp:
             self.run_command(['git', 'commit', '-F', '-', self.extra_options],
                 self.commit_done, working_dir=self.working_dir, stdin=fp.read())
 
@@ -164,6 +173,7 @@ class GitCommitCommand(GitWindowCommand):
 
 class GitCommitAmendCommand(GitCommitCommand):
     extra_options = "--amend"
+    quit_when_nothing_staged = False
 
     def diff_done(self, result):
         self.after_show = result
@@ -188,14 +198,17 @@ class GitCommitMessageListener(sublime_plugin.EventListener):
 class GitCommitHistoryCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         self.edit = edit
-        self.view.window().show_quick_panel(history, self.panel_done, sublime.MONOSPACE_FONT)
+        if history:
+            self.view.window().show_quick_panel(history, self.panel_done, sublime.MONOSPACE_FONT)
+        else:
+            sublime.message_dialog("You have no commit history.\n\nCommit history is just a quick list of messages you've used in this session.")
 
     def panel_done(self, index):
         if index > -1:
             self.view.replace(self.edit, self.view.sel()[0], history[index] + '\n')
 
 
-class GitCommitSelectedHunk(add.GitAddSelectedHunkCommand):
-    def run(self, edit):
-        self.run_command(['git', 'diff', '--no-color', self.get_file_name()], self.cull_diff)
+class GitCommitSelectedHunk(GitAddSelectedHunkCommand):
+    def cull_diff(self, result):
+        super(GitCommitSelectedHunk, self).cull_diff(result)
         self.get_window().run_command('git_commit')
